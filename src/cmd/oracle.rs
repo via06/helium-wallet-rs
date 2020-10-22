@@ -17,6 +17,8 @@ use structopt::StructOpt;
 #[derive(Debug, StructOpt)]
 pub enum Cmd {
     Report(Report),
+    ReportWeightedAverage(ReportWeightedAverage),
+    Automate(ReportWeightedAverage)
 }
 
 #[derive(Debug, StructOpt)]
@@ -38,10 +40,38 @@ pub struct Report {
     commit: bool,
 }
 
+#[derive(Debug, StructOpt)]
+/// Construct an oracle price report by averaging prices. Weights are accepted
+/// as arbitrary floats.
+pub struct ReportWeightedAverage {
+    /// Optional block height to report the price at.
+    /// Omit to use latest known block height from the API.
+    #[structopt(long)]
+    block: Option<u64>,
+
+    /// Weight given for Binance US price
+    #[structopt(long, default_value = "0")]
+    binance_us: f32,
+
+    /// Weight given for Binance International price
+    #[structopt(long, default_value = "0")]
+    binance_int: f32,
+
+    /// Weight given for Bilaxy price
+    #[structopt(long, default_value = "0")]
+    bilaxy: f32,
+
+    /// Weight given for Coingecko price
+    #[structopt(long, default_value = "0")]
+    coingecko: f32,
+}
+
 impl Cmd {
     pub fn run(&self, opts: Opts) -> Result {
         match self {
             Cmd::Report(cmd) => cmd.run(opts),
+            Cmd::ReportWeightedAverage(cmd) => cmd.run(opts),
+            Cmd::Automate(cmd) => cmd.run(opts),
         }
     }
 }
@@ -67,6 +97,47 @@ impl Report {
         } else {
             None
         };
+
+        print_txn(&txn, &envelope, &status, opts.format)
+    }
+}
+
+impl ReportWeightedAverage {
+    pub fn run(&self, opts: Opts) -> Result {
+
+        let weights = Weights {
+            binance_us: self.binance_us,
+            binance_int: self.binance_int,
+            bilaxy: self.bilaxy,
+            coingecko: self.coingecko,
+        };
+
+        let price = Price::from_weights(weights)?;
+
+        let client = Client::new_with_base_url(api_url());
+        let block_height = if let Some(block) = self.block {
+            block
+        } else {
+            client.get_height()?
+        };
+
+        println!("Report price {:?} @ block height {}?", price.0, block_height);
+        println!("Enter password to confirm.");
+
+        let password = get_password(false)?;
+        let wallet = load_wallet(opts.files)?;
+        let keypair = wallet.decrypt(password.as_bytes())?;
+
+        let mut txn = BlockchainTxnPriceOracleV1 {
+            public_key: keypair.pubkey_bin().into(),
+            price: price.to_millis(),
+            block_height,
+            signature: Vec::new(),
+        };
+
+        let envelope = txn.sign(&keypair, Signer::Owner)?.in_envelope();
+        let status = Some(client.submit_txn(&envelope)?);
+
 
         print_txn(&txn, &envelope, &status, opts.format)
     }
@@ -130,7 +201,78 @@ const USD_TO_PRICE_SCALAR: u64 = 100_000_000;
 #[derive(Clone, Copy, Debug, Serialize)]
 struct Price(Decimal);
 
+struct Weights {
+    binance_us: f32,
+    binance_int: f32,
+    bilaxy: f32,
+    coingecko: f32,
+}
+
+use retry::{retry as retry_fn, delay::Fixed};
+macro_rules! retry {
+    ( $x:expr ) => {
+        {
+            retry_fn(Fixed::from_millis(1000).take(10), || $x )
+        }
+    };
+}
+
+// general retry macro for API calls
+macro_rules! fetch_or_null {
+    ($name:literal, $val:expr, $fetch:expr ) => {
+        {
+             if $val != 0.0 {
+                match retry!($fetch) {
+                    Ok(price) =>  {
+                        println!("{:25} reports price of ${}", $name, price.0);
+                        ($val, price)
+                    }
+                    Err(_err) => {
+                        println!("Warning: {} is failing so removed from weighted average", $name);
+                        (0.0 , Price::null())
+                    }
+                }
+            } else {
+                (0.0 ,Price::null())
+            }
+        }
+    };
+}
 impl Price {
+
+    fn null() -> Price {
+        Price(Decimal::from_f32(0.0).unwrap())
+    }
+
+    fn from_weights(weights: Weights) -> Result<Self> {
+        let mut values = [
+            fetch_or_null!("Binance US", weights.binance_us, Price::from_binance_us()),
+            fetch_or_null!("Binance International", weights.binance_int, Price::from_binance_int()),
+            fetch_or_null!("Bilaxy", weights.bilaxy, Price::from_bilaxy()),
+            fetch_or_null!("Coingecko", weights.coingecko, Price::from_coingecko()),
+        ];
+
+        let mut price = Price::null();
+
+        let mut sum_weights = 0.0;
+        for value in values.iter_mut() {
+            sum_weights += value.0;
+            value.1.scale(value.0);
+            price += value.1;
+        };
+
+        if sum_weights == 0.0 {
+            panic!("Must have at least one price source! Use --help for more details");
+        }
+        let scalar = 1.0/sum_weights;
+        price.scale(scalar);
+        Ok(price)
+    }
+
+    fn scale(&mut self, scalar: f32) {
+        self.0 *= Decimal::from_f32(scalar).unwrap();
+    }
+
     fn from_coingecko() -> Result<Self> {
         let mut response = reqwest::get("https://api.coingecko.com/api/v3/coins/helium")?;
         let json: serde_json::Value = response.json()?;
@@ -176,6 +318,13 @@ impl Price {
             return Price(data);
         }
         panic!("Price value could not be parsed into Decimal")
+    }
+}
+
+use std::ops::AddAssign;
+impl AddAssign for Price {
+    fn add_assign(&mut self, other: Price) {
+        self.0 += other.0;
     }
 }
 
