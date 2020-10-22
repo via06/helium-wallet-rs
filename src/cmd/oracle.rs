@@ -18,7 +18,7 @@ use structopt::StructOpt;
 pub enum Cmd {
     Report(Report),
     ReportWeightedAverage(ReportWeightedAverage),
-    Automate(ReportWeightedAverage)
+    Automate(AutomatedReportByWeightedAverage),
 }
 
 #[derive(Debug, StructOpt)]
@@ -48,6 +48,31 @@ pub struct ReportWeightedAverage {
     /// Omit to use latest known block height from the API.
     #[structopt(long)]
     block: Option<u64>,
+
+    /// Weight given for Binance US price
+    #[structopt(long, default_value = "0")]
+    binance_us: f32,
+
+    /// Weight given for Binance International price
+    #[structopt(long, default_value = "0")]
+    binance_int: f32,
+
+    /// Weight given for Bilaxy price
+    #[structopt(long, default_value = "0")]
+    bilaxy: f32,
+
+    /// Weight given for Coingecko price
+    #[structopt(long, default_value = "0")]
+    coingecko: f32,
+}
+
+#[derive(Debug, StructOpt)]
+/// Construct an oracle price report by averaging prices. Weights are accepted
+/// as arbitrary floats. User inputs a delay between submissions.
+pub struct AutomatedReportByWeightedAverage {
+    /// Delay between price submissions
+    #[structopt(long, default_value = "15")]
+    delay: u64,
 
     /// Weight given for Binance US price
     #[structopt(long, default_value = "0")]
@@ -98,13 +123,12 @@ impl Report {
             None
         };
 
-        print_txn(&txn, &envelope, &status, opts.format)
+        print_txn(&txn, &envelope, &status, &opts.format)
     }
 }
 
 impl ReportWeightedAverage {
     pub fn run(&self, opts: Opts) -> Result {
-
         let weights = Weights {
             binance_us: self.binance_us,
             binance_int: self.binance_int,
@@ -112,7 +136,7 @@ impl ReportWeightedAverage {
             coingecko: self.coingecko,
         };
 
-        let price = Price::from_weights(weights)?;
+        let price = Price::from_weights(&weights)?;
 
         let client = Client::new_with_base_url(api_url());
         let block_height = if let Some(block) = self.block {
@@ -121,7 +145,10 @@ impl ReportWeightedAverage {
             client.get_height()?
         };
 
-        println!("Report price {:?} @ block height {}?", price.0, block_height);
+        println!(
+            "Report price {:?} @ block height {}?",
+            price.0, block_height
+        );
         println!("Enter password to confirm.");
 
         let password = get_password(false)?;
@@ -138,8 +165,53 @@ impl ReportWeightedAverage {
         let envelope = txn.sign(&keypair, Signer::Owner)?.in_envelope();
         let status = Some(client.submit_txn(&envelope)?);
 
+        print_txn(&txn, &envelope, &status, &opts.format)
+    }
+}
 
-        print_txn(&txn, &envelope, &status, opts.format)
+impl AutomatedReportByWeightedAverage {
+    pub fn run(&self, opts: Opts) -> Result {
+        use std::{thread::sleep, time};
+
+        let weights = Weights {
+            binance_us: self.binance_us,
+            binance_int: self.binance_int,
+            bilaxy: self.bilaxy,
+            coingecko: self.coingecko,
+        };
+
+        println!(
+            "Starting oracle report automation with the following weights:\n{:?}",
+            weights
+        );
+
+        println!("Enter password to start utility.");
+
+        let password = get_password(false)?;
+        let wallet = load_wallet(opts.files)?;
+        let keypair = wallet.decrypt(password.as_bytes())?;
+
+        loop {
+            let price = Price::from_weights(&weights)?;
+
+            let client = Client::new_with_base_url(api_url());
+            let block_height =
+                retry_fn(Fixed::from_millis(1000).take(10), || client.get_height()).unwrap();
+
+            let mut txn = BlockchainTxnPriceOracleV1 {
+                public_key: keypair.pubkey_bin().into(),
+                price: price.to_millis(),
+                block_height,
+                signature: Vec::new(),
+            };
+
+            let envelope = txn.sign(&keypair, Signer::Owner)?.in_envelope();
+            let status = Some(client.submit_txn(&envelope)?);
+
+            print_txn(&txn, &envelope, &status, &opts.format)?;
+            let minutes = time::Duration::from_secs(self.delay * 60);
+            sleep(minutes);
+        }
     }
 }
 
@@ -147,7 +219,7 @@ fn print_txn(
     txn: &BlockchainTxnPriceOracleV1,
     envelope: &BlockchainTxn,
     status: &Option<PendingTxnStatus>,
-    format: OutputFormat,
+    format: &OutputFormat,
 ) -> Result {
     let encoded = envelope.to_b64()?;
     match format {
@@ -201,6 +273,7 @@ const USD_TO_PRICE_SCALAR: u64 = 100_000_000;
 #[derive(Clone, Copy, Debug, Serialize)]
 struct Price(Decimal);
 
+#[derive(Debug, StructOpt)]
 struct Weights {
     binance_us: f32,
     binance_int: f32,
@@ -208,48 +281,52 @@ struct Weights {
     coingecko: f32,
 }
 
-use retry::{retry as retry_fn, delay::Fixed};
+// general retry macro for API calls
+use retry::{delay::Fixed, retry as retry_fn};
 macro_rules! retry {
-    ( $x:expr ) => {
-        {
-            retry_fn(Fixed::from_millis(1000).take(10), || $x )
-        }
-    };
+    ( $x:expr ) => {{
+        retry_fn(Fixed::from_millis(1000).take(10), $x)
+    }};
 }
 
-// general retry macro for API calls
+// macro for trying to fetch, puts 0 if API fails
+// also returns 0 without fetch is weight is 0
 macro_rules! fetch_or_null {
-    ($name:literal, $val:expr, $fetch:expr ) => {
-        {
-             if $val != 0.0 {
-                match retry!($fetch) {
-                    Ok(price) =>  {
-                        println!("{:25} reports price of ${}", $name, price.0);
-                        ($val, price)
-                    }
-                    Err(_err) => {
-                        println!("Warning: {} is failing so removed from weighted average", $name);
-                        (0.0 , Price::null())
-                    }
+    ($name:literal, $val:expr, $fetch:expr ) => {{
+        if $val != 0.0 {
+            match retry!($fetch) {
+                Ok(price) => {
+                    println!("{:25} reports price of ${}", $name, price.0);
+                    ($val, price)
                 }
-            } else {
-                (0.0 ,Price::null())
+                Err(_err) => {
+                    println!(
+                        "Warning: {} is failing so removed from weighted average",
+                        $name
+                    );
+                    (0.0, Price::null())
+                }
             }
+        } else {
+            (0.0, Price::null())
         }
-    };
+    }};
 }
 impl Price {
-
     fn null() -> Price {
         Price(Decimal::from_f32(0.0).unwrap())
     }
 
-    fn from_weights(weights: Weights) -> Result<Self> {
+    fn from_weights(weights: &Weights) -> Result<Self> {
         let mut values = [
-            fetch_or_null!("Binance US", weights.binance_us, Price::from_binance_us()),
-            fetch_or_null!("Binance International", weights.binance_int, Price::from_binance_int()),
-            fetch_or_null!("Bilaxy", weights.bilaxy, Price::from_bilaxy()),
-            fetch_or_null!("Coingecko", weights.coingecko, Price::from_coingecko()),
+            fetch_or_null!("Binance US", weights.binance_us, Price::from_binance_us),
+            fetch_or_null!(
+                "Binance International",
+                weights.binance_int,
+                Price::from_binance_int
+            ),
+            fetch_or_null!("Bilaxy", weights.bilaxy, Price::from_bilaxy),
+            fetch_or_null!("Coingecko", weights.coingecko, Price::from_coingecko),
         ];
 
         let mut price = Price::null();
@@ -259,12 +336,12 @@ impl Price {
             sum_weights += value.0;
             value.1.scale(value.0);
             price += value.1;
-        };
+        }
 
         if sum_weights == 0.0 {
             panic!("Must have at least one price source! Use --help for more details");
         }
-        let scalar = 1.0/sum_weights;
+        let scalar = 1.0 / sum_weights;
         price.scale(scalar);
         Ok(price)
     }
@@ -296,8 +373,7 @@ impl Price {
     }
 
     fn from_binance_int() -> Result<Self> {
-        let mut response =
-            reqwest::get("https://api.binance.us/api/v3/avgPrice?symbol=HNTUSDT")?;
+        let mut response = reqwest::get("https://api.binance.us/api/v3/avgPrice?symbol=HNTUSDT")?;
         let json: serde_json::Value = response.json()?;
         let amount = &json["price"];
         Price::from_str(amount.as_str().ok_or("No USD value found")?)

@@ -692,7 +692,7 @@ dependencies = [
 [[package]]
 name = "helium-proto"
 version = "0.1.0"
-source = "git+https://github.com/helium/proto?branch=master#5baedf16e08385684edd325c62cbf4b7490b033b"
+source = "git+https://github.com/helium/proto#5baedf16e08385684edd325c62cbf4b7490b033b"
 dependencies = [
  "bytes 0.4.12",
  "prost",
@@ -708,7 +708,7 @@ dependencies = [
  "base64",
  "bs58",
  "byteorder",
- "bytes 0.4.12",
+ "bytes 0.5.6",
  "console",
  "dialoguer",
  "helium-api",
@@ -721,6 +721,7 @@ dependencies = [
  "qr2term",
  "regex",
  "reqwest",
+ "retry",
  "rust_decimal",
  "serde",
  "serde_derive",
@@ -1623,6 +1624,15 @@ dependencies = [
  "url 1.7.2",
  "uuid",
  "winreg",
+]
+
+[[package]]
+name = "retry"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddadf3a46af916aa0fe6b8283e676b6bb5cbdf835d986d98a49d7345072341e5"
+dependencies = [
+ "rand 0.7.3",
 ]
 
 [[package]]
