@@ -10,7 +10,7 @@ use helium_api::{BlockchainTxn, BlockchainTxnPriceOracleV1, Client, PendingTxnSt
 use rust_decimal::{prelude::*, Decimal};
 use serde::Serialize;
 use serde_json::json;
-use std::str::FromStr;
+use std::{cmp, str::FromStr};
 use structopt::StructOpt;
 
 /// Report an oracle price to the blockchain
@@ -68,11 +68,19 @@ pub struct ReportWeightedAverage {
 
 #[derive(Debug, StructOpt)]
 /// Construct an oracle price report by averaging prices. Weights are accepted
-/// as arbitrary floats. User inputs a delay between submissions.
+/// as arbitrary floats. User inputs for randomized delay between submissions.
 pub struct AutomatedReportByWeightedAverage {
-    /// Delay between price submissions
+    /// Average delay between price submissions
     #[structopt(long, default_value = "15")]
-    delay: u64,
+    delay: u16, // constrain to 16 bit int for range
+
+    /// Standard dev between price submissions
+    #[structopt(long, default_value = "8")]
+    std_dev: u16, // constrain to 16 bit int for range
+
+    /// Min time between price submissions
+    #[structopt(long, default_value = "8")]
+    min: u16, // constrain to 16 bit int for range
 
     /// Weight given for Binance US price
     #[structopt(long, default_value = "0")]
@@ -169,9 +177,15 @@ impl ReportWeightedAverage {
     }
 }
 
+use rand::thread_rng;
+use rand_distr::{Distribution, Normal};
+
 impl AutomatedReportByWeightedAverage {
     pub fn run(&self, opts: Opts) -> Result {
         use std::{thread::sleep, time};
+        let mut rng = thread_rng();
+
+        let distribution = Normal::new(self.delay as f32, self.std_dev as f32)?;
 
         let weights = Weights {
             binance_us: self.binance_us,
@@ -209,7 +223,10 @@ impl AutomatedReportByWeightedAverage {
             let status = Some(client.submit_txn(&envelope)?);
 
             print_txn(&txn, &envelope, &status, &opts.format)?;
-            let minutes = time::Duration::from_secs(self.delay * 60);
+
+            let delay_mins = cmp::min(self.min, distribution.sample(&mut rng) as u16) as u64;
+            println!("Next report will be in {}", delay_mins);
+            let minutes = time::Duration::from_secs(delay_mins * 60);
             sleep(minutes);
         }
     }
