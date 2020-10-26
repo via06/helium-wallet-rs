@@ -71,7 +71,7 @@ pub struct ReportWeightedAverage {
 /// as arbitrary floats. User inputs for randomized delay between submissions.
 pub struct AutomatedReportByWeightedAverage {
     /// Average delay between price submissions
-    #[structopt(long, default_value = "15")]
+    #[structopt(long, default_value = "30")]
     delay: u16, // constrain to 16 bit int for range
 
     /// Standard dev between price submissions
@@ -79,8 +79,17 @@ pub struct AutomatedReportByWeightedAverage {
     std_dev: u16, // constrain to 16 bit int for range
 
     /// Min time between price submissions
-    #[structopt(long, default_value = "8")]
+    #[structopt(long, default_value = "10")]
     min: u16, // constrain to 16 bit int for range
+
+    /// Percentage change threshold to trigger
+    /// instantenous submission
+    #[structopt(long, default_value = "1")]
+    threshold: f32,
+
+    /// Seconds between price checks against APIs
+    #[structopt(long, default_value = "15")]
+    price_check_delay: u16,
 
     /// Weight given for Binance US price
     #[structopt(long, default_value = "0")]
@@ -180,6 +189,19 @@ impl ReportWeightedAverage {
 use rand::thread_rng;
 use rand_distr::{Distribution, Normal};
 
+fn price_has_changed_enough(old_price: &Price, new_price: &Price, change: f32) -> bool {
+    // copy and scale old price for Upper Bound
+    let mut old_price_ub = *old_price;
+    old_price_ub.scale(1.0 + change / 100.0);
+
+    // copy and scale new price for Lower Bound
+    let mut old_price_lb = *old_price;
+    old_price_lb.scale(1.0 - change / 100.0);
+
+    // compare bounds to new price
+    &old_price_ub < new_price || &old_price_lb > new_price
+}
+
 impl AutomatedReportByWeightedAverage {
     pub fn run(&self, opts: Opts) -> Result {
         use std::{thread::sleep, time};
@@ -198,6 +220,11 @@ impl AutomatedReportByWeightedAverage {
             "Starting oracle report automation with the following weights:\n{:?}",
             weights
         );
+        println!("Automatic price updates will be on average every {} mins, with a std dev of {}, and a minimum report time of {} mins",
+            self.delay,
+            self.std_dev,
+            self.min
+        );
 
         println!("Enter password to start utility.");
 
@@ -205,29 +232,55 @@ impl AutomatedReportByWeightedAverage {
         let wallet = load_wallet(opts.files)?;
         let keypair = wallet.decrypt(password.as_bytes())?;
 
+        let price_check_delay = time::Duration::from_secs(self.price_check_delay as u64);
+        let mut next_submission = time::Instant::now();
+        let mut last_submit_price = Price::from_weights(&weights)?;
         loop {
-            let price = Price::from_weights(&weights)?;
+            let current_price = Price::from_weights(&weights)?;
+            println!("=========================================================");
+            println!(
+                "Current weighted price                     ${}",
+                current_price.0
+            );
+            let mut submit = false;
+            if next_submission < time::Instant::now() {
+                submit = true;
+                let delay_plus_random =
+                    cmp::max(self.min, distribution.sample(&mut rng) as u16) as u64;
+                next_submission += time::Duration::from_secs(delay_plus_random * 60);
+                println!(
+                    "Next time-based report will be in {} minutes",
+                    delay_plus_random
+                );
+            }
 
-            let client = Client::new_with_base_url(api_url());
-            let block_height =
-                retry_fn(Fixed::from_millis(1000).take(10), || client.get_height()).unwrap();
+            if price_has_changed_enough(&last_submit_price, &current_price, self.threshold) {
+                println!("Submitting report because threshold change of {}% has been met. Last submitted price ${}, Current Price ${}", self.threshold, last_submit_price.0, current_price.0);
+                submit = true;
+            }
 
-            let mut txn = BlockchainTxnPriceOracleV1 {
-                public_key: keypair.pubkey_bin().into(),
-                price: price.to_millis(),
-                block_height,
-                signature: Vec::new(),
-            };
+            if submit {
+                let client = Client::new_with_base_url(api_url());
+                let block_height =
+                    retry_fn(Fixed::from_millis(1000).take(10), || client.get_height()).unwrap();
 
-            let envelope = txn.sign(&keypair, Signer::Owner)?.in_envelope();
-            let status = Some(client.submit_txn(&envelope)?);
+                let mut txn = BlockchainTxnPriceOracleV1 {
+                    public_key: keypair.pubkey_bin().into(),
+                    price: current_price.to_millis(),
+                    block_height,
+                    signature: Vec::new(),
+                };
 
-            print_txn(&txn, &envelope, &status, &opts.format)?;
+                let envelope = txn.sign(&keypair, Signer::Owner)?.in_envelope();
+                let status = Some(client.submit_txn(&envelope)?);
 
-            let delay_mins = cmp::min(self.min, distribution.sample(&mut rng) as u16) as u64;
-            println!("Next report will be in {}", delay_mins);
-            let minutes = time::Duration::from_secs(delay_mins * 60);
-            sleep(minutes);
+                print_txn(&txn, &envelope, &status, &opts.format)?;
+                last_submit_price = current_price;
+            } else {
+                println!("Price changed within threshold and time-based report not due\n");
+            }
+
+            sleep(price_check_delay);
         }
     }
 }
@@ -411,6 +464,19 @@ impl Price {
             return Price(data);
         }
         panic!("Price value could not be parsed into Decimal")
+    }
+}
+
+use std::cmp::Ordering;
+impl PartialOrd for Price {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.0.cmp(&other.0))
+    }
+}
+
+impl PartialEq for Price {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
     }
 }
 
