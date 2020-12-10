@@ -272,13 +272,12 @@ impl AutomatedReportByWeightedAverage {
                 };
 
                 let envelope = txn.sign(&keypair, Signer::Owner)?.in_envelope();
-                
+
                 if let Ok(status) = client.submit_txn(&envelope) {
-                    print_txn(&txn, &envelope, &status, &opts.format)?;
+                    let maybe_status = Some(status);
+                    print_txn(&txn, &envelope, &maybe_status, &opts.format)?;
                     last_submit_price = current_price;
                 }
-
-
             } else {
                 println!("Price changed within threshold and time-based report not due\n");
             }
@@ -291,7 +290,7 @@ impl AutomatedReportByWeightedAverage {
 fn print_txn(
     txn: &BlockchainTxnPriceOracleV1,
     envelope: &BlockchainTxn,
-    status: &PendingTxnStatus,
+    status: &Option<PendingTxnStatus>,
     format: &OutputFormat,
 ) -> Result {
     let encoded = envelope.to_b64()?;
