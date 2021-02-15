@@ -147,7 +147,7 @@ fn get_seed_words(seed_type: &mnemonic::SeedType) -> Result<Vec<String>> {
         .with_prompt("Space separated seed words")
         .validate_with(|v: &String| {
             let word_list = split_str(v);
-            match mnemonic::mnemonic_to_entropy(word_list, seed_type) {
+            match mnemonic::mnemonic_to_entropy(word_list, *seed_type) {
                 Ok(_) => Ok(()),
                 Err(err) => Err(err),
             }

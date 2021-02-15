@@ -148,7 +148,7 @@ fn gen_keypair(
     // Anything else is an error.
     match (seed_words, seed_type) {
         (Some(words), Some(seed_type)) => {
-            let entropy = mnemonic_to_entropy(words, seed_type)?;
+            let entropy = mnemonic_to_entropy(words, *seed_type)?;
             Keypair::generate_from_entropy(tag, &entropy)
         }
         (None, None) => Ok(Keypair::generate(tag)),

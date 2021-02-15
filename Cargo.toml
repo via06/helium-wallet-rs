@@ -3,7 +3,6 @@ name = "helium-wallet"
 version = "1.5.5-dev"
 authors = ["Helium <info@helium.com>"]
 edition = "2018"
-build = "build.rs"
 
 description = "A Rust Helium Wallet library"
 readme = "README.md"
