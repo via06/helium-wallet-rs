@@ -1,0 +1,17 @@
+From ccd5ea1f6571caf2475162168f3eae8a9834a107 Mon Sep 17 00:00:00 2001
+From: Rachel Bautista <93613902+via06@users.noreply.github.com>
+Date: Wed, 12 Jan 2022 22:57:01 +0800
+Subject: [PATCH] Update helium-wallet
+
+---
+ bin/helium-wallet | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/bin/helium-wallet b/bin/helium-wallet
+index 63f8087..ec64c27 120000
+--- a/bin/helium-wallet
++++ b/bin/helium-wallet
+@@ -1 +1 @@
+-../target/release/helium-wallet
+\ No newline at end of file
++https://github.com/via06/helium-wallet-rs/master/bin/helium-wallet../target/release/helium-wallet
